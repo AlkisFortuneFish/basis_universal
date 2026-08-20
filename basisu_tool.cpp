@@ -325,6 +325,39 @@ class command_line_params
 		return false;
 	}
 
+	bool check_for_output_options(const char** arg_v, const char* pArg, int arg_index, const int num_remaining_args, int& arg_count)
+	{
+		if (opt_match(pArg, { "-output_file", "-out_file" }))
+		{
+			REMAINING_ARGS_CHECK(1);
+			m_output_filename = arg_v[arg_index + 1];
+			arg_count++;
+			return true;
+		}
+		else if (opt_match(pArg, { "-output_path", "-out_path" }))
+		{
+			REMAINING_ARGS_CHECK(1);
+			m_output_path = arg_v[arg_index + 1];
+			arg_count++;
+			return true;
+		}
+		else if (opt_match(pArg, { "-input_root_path", "-in_root_path" }))
+		{
+			REMAINING_ARGS_CHECK(1);
+			m_input_root_path = arg_v[arg_index + 1];
+			if (m_input_root_path.size() && m_input_root_path.back() != '/' && m_input_root_path.back() != '\\')
+				m_input_root_path += '/';
+			arg_count++;
+			return true;
+		}
+		else if (opt_match(pArg, { "-no_overwrite", "-no_clobber" }))
+		{
+			m_no_overwrite = true;
+			return true;
+		}
+		return false;
+	}
+
 	bool check_for_xuastc_options(const char** arg_v, const char* pArg, int arg_index, const int num_remaining_args, int& arg_count)
 	{
 		// New unified -quality level which works across all codecs
@@ -1243,8 +1276,11 @@ public:
 				print_usage();
 				exit(EXIT_SUCCESS);
 			}
-			
-			if (check_for_etc1s_or_uastc_options(arg_v, pArg, arg_index, num_remaining_args, arg_count))
+
+			if (check_for_output_options(arg_v, pArg, arg_index, num_remaining_args, arg_count))
+			{
+			}
+			else if (check_for_etc1s_or_uastc_options(arg_v, pArg, arg_index, num_remaining_args, arg_count))
 			{
 			}
 			else if (check_for_hdr_options(arg_v, pArg, arg_index, num_remaining_args, arg_count))
@@ -1718,18 +1754,6 @@ public:
 				m_comp_params.m_resample_factor = (float)atof(arg_v[arg_index + 1]);
 				arg_count++;
 			}
-			else if (opt_match(pArg, { "-output_file", "-out_file" }))
-			{
-				REMAINING_ARGS_CHECK(1);
-				m_output_filename = arg_v[arg_index + 1];
-				arg_count++;
-			}
-			else if (opt_match(pArg, { "-output_path", "-out_path" } ))
-			{
-				REMAINING_ARGS_CHECK(1);
-				m_output_path = arg_v[arg_index + 1];
-				arg_count++;
-			}
 			else if (opt_match(pArg, "-debug"))
 			{
 				m_comp_params.m_debug = true;
@@ -2147,6 +2171,8 @@ public:
 
 	std::string m_output_filename;
 	std::string m_output_path;
+	std::string m_input_root_path;
+	bool m_no_overwrite;
 
 	// Target texture format string for -export_dds (e.g. "BC1", "BC7", "RGBA32").
 	std::string m_export_dds_format;
@@ -2482,8 +2508,28 @@ static bool compress_mode(command_line_params &opts)
 		{
 			std::string filename;
 
-			string_get_filename(opts.m_input_filenames[file_index].c_str(), filename);
-			string_remove_extension(filename);
+			if (opts.m_input_root_path.size())
+			{
+				// Preserve relative path structure under the output directory
+				filename = opts.m_input_filenames[file_index];
+				// Strip the root path prefix if present (case-insensitive on Windows)
+#ifdef _WIN32
+				if (filename.size() >= opts.m_input_root_path.size() &&
+					_strnicmp(filename.c_str(), opts.m_input_root_path.c_str(), opts.m_input_root_path.size()) == 0)
+#else
+				if (filename.size() >= opts.m_input_root_path.size() &&
+					strncmp(filename.c_str(), opts.m_input_root_path.c_str(), opts.m_input_root_path.size()) == 0)
+#endif
+				{
+					filename = filename.substr(opts.m_input_root_path.size());
+				}
+				string_remove_extension(filename);
+			}
+			else
+			{
+				string_get_filename(opts.m_input_filenames[file_index].c_str(), filename);
+				string_remove_extension(filename);
+			}
 
 			if (opts.m_ktx2_mode)
 				filename += ".ktx2";
@@ -2493,7 +2539,24 @@ static bool compress_mode(command_line_params &opts)
 			if (opts.m_output_path.size())
 				string_combine_path(filename, opts.m_output_path.c_str(), filename.c_str());
 
+			// When preserving relative paths, ensure output subdirectories exist
+			if (opts.m_input_root_path.size())
+			{
+				std::filesystem::path out_dir = std::filesystem::path(filename).parent_path();
+				if (!out_dir.empty())
+					std::filesystem::create_directories(out_dir);
+			}
+
 			params.m_out_filename = filename;
+		}
+
+		// Skip files that already exist when -no_overwrite is set
+		if (opts.m_no_overwrite && std::filesystem::exists(params.m_out_filename))
+		{
+			if (params.m_status_output)
+				printf("Skipping \"%s\" (already exists)\n", params.m_out_filename.c_str());
+			total_successes++;
+			continue;
 		}
 
 		if (opts.m_parallel_compression)
